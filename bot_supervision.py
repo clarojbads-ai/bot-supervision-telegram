@@ -2,12 +2,12 @@
 # Requisitos:
 #   pip install -U python-telegram-bot==21.6 gspread google-auth pillow
 #
-# Ejecutar (PowerShell):
+# Ejecutar (Windows / PowerShell):
 #   $env:BOT_TOKEN="TU_TOKEN"
 #   $env:SHEET_ID="TU_SHEET_ID"
 #   $env:SHEET_TAB_PLANTILLAS="Plantillas"
 #   $env:SHEET_TAB_SUPERVISIONES="Supervisiones"
-#   $env:GOOGLE_CREDS_JSON="google_creds.json"
+#   $env:GOOGLE_CREDS_JSON_TEXT=(Get-Content google_creds.json -Raw)   # opcional
 #   python bot_supervision.py
 #
 # IMPORTANTE:
@@ -57,21 +57,26 @@ logging.basicConfig(
 # =========================
 # ENV
 # =========================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "PON_AQUI_TU_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 SHEET_ID = os.getenv("SHEET_ID", "").strip()
 SHEET_TAB_PLANTILLAS = os.getenv("SHEET_TAB_PLANTILLAS", "Plantillas").strip()
 SHEET_TAB_SUPERVISIONES = os.getenv("SHEET_TAB_SUPERVISIONES", "Supervisiones").strip()
-GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON", "google_creds.json").strip()
 
-CONFIG_PATH = os.getenv("CONFIG_PATH", "group_links.json")
+# En Railway NO subas el archivo google_creds.json al repo.
+# Usa GOOGLE_CREDS_JSON_TEXT (contenido del JSON completo) y el bot creará el archivo al iniciar.
+GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON", "google_creds.json").strip()
+GOOGLE_CREDS_JSON_TEXT = os.getenv("GOOGLE_CREDS_JSON_TEXT", "").strip()
+
+# Config persistencia (Railway: filesystem efímero; recomendado: /tmp/group_links.json)
+CONFIG_PATH = os.getenv("CONFIG_PATH", "group_links.json").strip()
 
 MAX_MEDIA_PER_BUCKET = 8  # fotos + videos
 
 # Watermark
-ENABLE_WATERMARK_PHOTOS = True  # si no quieres watermark, pon False
-WM_DIR = "wm_tmp"
-WM_FONT_SIZE = 22
+ENABLE_WATERMARK_PHOTOS = os.getenv("ENABLE_WATERMARK_PHOTOS", "true").lower() in ("1", "true", "yes", "y")
+WM_DIR = os.getenv("WM_DIR", "wm_tmp").strip()  # Railway recomendado: /tmp/wm_tmp
+WM_FONT_SIZE = int(os.getenv("WM_FONT_SIZE", "22"))
 
 # =========================
 # STATES
@@ -152,6 +157,14 @@ def load_cfg() -> None:
         GROUP_CFG = {"evidencias": {}, "links": {}}
 
 def save_cfg() -> None:
+    # Aseguramos directorio si CONFIG_PATH es /tmp/...
+    try:
+        d = os.path.dirname(CONFIG_PATH)
+        if d:
+            os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(GROUP_CFG, f, ensure_ascii=False, indent=2)
 
@@ -373,8 +386,29 @@ async def apply_watermark_photo_if_needed(
 # =========================
 _GS_CACHE: Dict[str, Any] = {"client": None, "p_headers": None, "s_headers": None}
 
+def ensure_google_creds_file() -> None:
+    """
+    Railway: crea el archivo GOOGLE_CREDS_JSON (default google_creds.json)
+    usando el contenido de GOOGLE_CREDS_JSON_TEXT.
+    """
+    if GOOGLE_CREDS_JSON_TEXT and not os.path.exists(GOOGLE_CREDS_JSON):
+        try:
+            # Asegurar directorio si la ruta incluye carpeta
+            d = os.path.dirname(GOOGLE_CREDS_JSON)
+            if d:
+                os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+        with open(GOOGLE_CREDS_JSON, "w", encoding="utf-8") as f:
+            f.write(GOOGLE_CREDS_JSON_TEXT)
+
 def _gs_ready() -> bool:
-    return bool(SHEET_ID) and os.path.exists(GOOGLE_CREDS_JSON)
+    # Acepta creds por archivo o por texto.
+    if not SHEET_ID:
+        return False
+    if GOOGLE_CREDS_JSON_TEXT:
+        return True
+    return os.path.exists(GOOGLE_CREDS_JSON)
 
 def gs_clear_cache() -> None:
     _GS_CACHE.update({"client": None, "p_headers": None, "s_headers": None})
@@ -383,8 +417,10 @@ def gs_client() -> gspread.Client:
     if _GS_CACHE["client"] is not None:
         return _GS_CACHE["client"]
 
+    ensure_google_creds_file()
+
     if not _gs_ready():
-        raise RuntimeError("Google Sheets no está configurado (SHEET_ID o GOOGLE_CREDS_JSON).")
+        raise RuntimeError("Google Sheets no está configurado (SHEET_ID o GOOGLE_CREDS_JSON_TEXT/archivo).")
 
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -899,7 +935,7 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     section = s_.get("current_section")
     bucket = s_.get("current_bucket")
 
-    # si no hay sección activa, ignoramos (no rompemos chat)
+    # si no hay sección activa, ignoramos
     if not section:
         return
 
@@ -927,7 +963,8 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, wm_path = await apply_watermark_photo_if_needed(
             context.application,
             item["file_id"],
-            lat, lon,
+            lat,
+            lon,
             sent_dt_local=sent_dt,
         )
         if wm_path:
@@ -1283,8 +1320,8 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 def main():
     load_cfg()
 
-    if BOT_TOKEN.startswith("PON_"):
-        raise SystemExit("Configura BOT_TOKEN (variable de entorno BOT_TOKEN o en el código).")
+    if not BOT_TOKEN:
+        raise SystemExit("Configura BOT_TOKEN como variable de entorno en Railway o en tu entorno local.")
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_error_handler(on_error)
@@ -1362,6 +1399,7 @@ def main():
     # 2) Captura de plantilla (no interfiere con el código; y va después del rescate)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_capture_plantilla), group=2)
 
+    logging.info("✅ Bot iniciado. Polling...")
     app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
