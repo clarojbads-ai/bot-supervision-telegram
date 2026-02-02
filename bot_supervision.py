@@ -7,7 +7,7 @@
 #   $env:SHEET_ID="TU_SHEET_ID"
 #   $env:SHEET_TAB_PLANTILLAS="Plantillas"
 #   $env:SHEET_TAB_SUPERVISIONES="Supervisiones"
-#   $env:GOOGLE_CREDS_JSON_TEXT=(Get-Content google_creds.json -Raw)   # opcional
+#   $env:GOOGLE_CREDS_JSON_TEXT=(Get-Content google_creds.json -Raw)   # recomendado en Railway
 #   python bot_supervision.py
 #
 # IMPORTANTE:
@@ -63,12 +63,12 @@ SHEET_ID = os.getenv("SHEET_ID", "").strip()
 SHEET_TAB_PLANTILLAS = os.getenv("SHEET_TAB_PLANTILLAS", "Plantillas").strip()
 SHEET_TAB_SUPERVISIONES = os.getenv("SHEET_TAB_SUPERVISIONES", "Supervisiones").strip()
 
-# En Railway NO subas el archivo google_creds.json al repo.
-# Usa GOOGLE_CREDS_JSON_TEXT (contenido del JSON completo) y el bot creará el archivo al iniciar.
+# En Railway: NO subas google_creds.json al repo.
+# Usa GOOGLE_CREDS_JSON_TEXT (contenido JSON completo).
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON", "google_creds.json").strip()
 GOOGLE_CREDS_JSON_TEXT = os.getenv("GOOGLE_CREDS_JSON_TEXT", "").strip()
 
-# Config persistencia (Railway: filesystem efímero; recomendado: /tmp/group_links.json)
+# Config persistencia (Railway filesystem es efímero; recomendado: /tmp/group_links.json)
 CONFIG_PATH = os.getenv("CONFIG_PATH", "group_links.json").strip()
 
 MAX_MEDIA_PER_BUCKET = 8  # fotos + videos
@@ -157,7 +157,6 @@ def load_cfg() -> None:
         GROUP_CFG = {"evidencias": {}, "links": {}}
 
 def save_cfg() -> None:
-    # Aseguramos directorio si CONFIG_PATH es /tmp/...
     try:
         d = os.path.dirname(CONFIG_PATH)
         if d:
@@ -335,7 +334,6 @@ async def apply_watermark_photo_if_needed(
     """
     Devuelve (file_id_original, path_local_watermarked_or_none)
     - En fotos: descarga, coloca texto y guarda en WM_DIR para re-enviar como archivo local.
-    - En Railway funciona igual (filesystem efímero).
     """
     if not ENABLE_WATERMARK_PHOTOS:
         return file_id, None
@@ -388,12 +386,12 @@ _GS_CACHE: Dict[str, Any] = {"client": None, "p_headers": None, "s_headers": Non
 
 def ensure_google_creds_file() -> None:
     """
-    Railway: crea el archivo GOOGLE_CREDS_JSON (default google_creds.json)
+    Compat: crea el archivo GOOGLE_CREDS_JSON (default google_creds.json)
     usando el contenido de GOOGLE_CREDS_JSON_TEXT.
+    (En Railway preferimos NO usar archivo y usar from_service_account_info.)
     """
     if GOOGLE_CREDS_JSON_TEXT and not os.path.exists(GOOGLE_CREDS_JSON):
         try:
-            # Asegurar directorio si la ruta incluye carpeta
             d = os.path.dirname(GOOGLE_CREDS_JSON)
             if d:
                 os.makedirs(d, exist_ok=True)
@@ -403,7 +401,6 @@ def ensure_google_creds_file() -> None:
             f.write(GOOGLE_CREDS_JSON_TEXT)
 
 def _gs_ready() -> bool:
-    # Acepta creds por archivo o por texto.
     if not SHEET_ID:
         return False
     if GOOGLE_CREDS_JSON_TEXT:
@@ -413,11 +410,10 @@ def _gs_ready() -> bool:
 def gs_clear_cache() -> None:
     _GS_CACHE.update({"client": None, "p_headers": None, "s_headers": None})
 
+# ✅ CAMBIO PRINCIPAL: usar from_service_account_info cuando hay GOOGLE_CREDS_JSON_TEXT
 def gs_client() -> gspread.Client:
     if _GS_CACHE["client"] is not None:
         return _GS_CACHE["client"]
-
-    ensure_google_creds_file()
 
     if not _gs_ready():
         raise RuntimeError("Google Sheets no está configurado (SHEET_ID o GOOGLE_CREDS_JSON_TEXT/archivo).")
@@ -426,7 +422,21 @@ def gs_client() -> gspread.Client:
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds = Credentials.from_service_account_file(GOOGLE_CREDS_JSON, scopes=scopes)
+
+    # Preferir JSON texto (Railway)
+    if GOOGLE_CREDS_JSON_TEXT:
+        info = json.loads(GOOGLE_CREDS_JSON_TEXT)
+
+        # Arreglo típico: Railway puede dejar \\n literal en private_key
+        pk = info.get("private_key", "")
+        if isinstance(pk, str) and "\\n" in pk:
+            info["private_key"] = pk.replace("\\n", "\n")
+
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
+    else:
+        ensure_google_creds_file()
+        creds = Credentials.from_service_account_file(GOOGLE_CREDS_JSON, scopes=scopes)
+
     client = gspread.authorize(creds)
     _GS_CACHE["client"] = client
     return client
@@ -562,10 +572,8 @@ async def auto_capture_plantilla(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     text = msg.text.strip()
-    if not re.search(r"(?im)^c[oó]digo\s+pedido\s*:", text, re.MULTILINE) and not re.search(r"(?im)\nc[oó]digo\s+pedido\s*:", text):
-        # (cubre cuando "Código pedido:" no es la primera línea)
-        if not re.search(r"(?im)c[oó]digo\s+pedido\s*:", text):
-            return
+    if not re.search(r"(?im)c[oó]digo\s+pedido\s*:", text):
+        return
 
     data = parse_plantilla(text)
     codigo = data.get("CodigoPedido", "").strip()
@@ -710,6 +718,7 @@ async def set_evidencias_rafael(update: Update, context: ContextTypes.DEFAULT_TY
 async def set_evidencias_edgar(update: Update, context: ContextTypes.DEFAULT_TYPE): await _set_evidencias(update, context, "edgar")
 async def set_evidencias_harnol(update: Update, context: ContextTypes.DEFAULT_TYPE): await _set_evidencias(update, context, "harnol")
 async def set_evidencias_nelson(update: Update, context: ContextTypes.DEFAULT_TYPE): await _set_evidencias(update, context, "nelson")
+async def set_evidencias_pruebas(update: Update, context: ContextTypes.DEFAULT_TYPE): await _set_evidencias(update, context, "pruebas")
 
 async def _link_from_auditorias(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str):
     if not in_group(update):
@@ -732,6 +741,7 @@ async def link_rafael(update: Update, context: ContextTypes.DEFAULT_TYPE): await
 async def link_edgar(update: Update, context: ContextTypes.DEFAULT_TYPE): await _link_from_auditorias(update, context, "edgar")
 async def link_harnol(update: Update, context: ContextTypes.DEFAULT_TYPE): await _link_from_auditorias(update, context, "harnol")
 async def link_nelson(update: Update, context: ContextTypes.DEFAULT_TYPE): await _link_from_auditorias(update, context, "nelson")
+async def link_pruebas(update: Update, context: ContextTypes.DEFAULT_TYPE): await _link_from_auditorias(update, context, "pruebas")
 
 async def ver_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ev = GROUP_CFG.get("evidencias", {})
@@ -739,7 +749,7 @@ async def ver_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["🧩 CONFIG LINKS\n"]
     lines.append("📌 Evidencias configuradas:")
-    for k in ["rafael", "edgar", "harnol", "nelson"]:
+    for k in ["rafael", "edgar", "harnol", "nelson", "pruebas"]:
         lines.append(f"• {k}: {'✅' if ev.get(k) else '❌'}")
 
     lines.append("\n📌 Links Auditorías ➜ Evidencias:")
@@ -935,7 +945,6 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     section = s_.get("current_section")
     bucket = s_.get("current_bucket")
 
-    # si no hay sección activa, ignoramos
     if not section:
         return
 
@@ -1042,7 +1051,7 @@ async def on_write_obs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     b = ensure_bucket(s_, section, bucket)
 
-    # ✅ Permitimos cualquier caracter (-, *, etc.)
+    # Permitimos cualquier caracter (-, *, etc.)
     if b.get("obs"):
         b["obs"] = (b["obs"].rstrip() + "\n" + obs).strip()
     else:
@@ -1234,6 +1243,8 @@ def build_supervisiones_row(s_: Dict[str, Any]) -> Dict[str, Any]:
 
     row["Observaciones ADICIONALES"] = s_.get("opcionales", {}).get("obs", "")
     row["Observaciones FINALES"] = s_.get("final_text", "")
+
+    # Nota: si tu hoja no tiene PlantillaUUID, no pasa nada (se ignorará porque el header manda).
     row["PlantillaUUID"] = s_.get("plantilla_uuid", "")
 
     return row
@@ -1288,11 +1299,15 @@ async def on_final_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title += f"\n📝 Obs: {opc['obs']}"
         await send_media_section(context.application, dest_evidencias_id, title, opc["media"])
 
+    # ✅ CAMBIO: logs claros para ver si realmente intenta y si falla
     if _gs_ready():
         try:
-            gs_append_dict(SHEET_TAB_SUPERVISIONES, build_supervisiones_row(s_))
+            payload = build_supervisiones_row(s_)
+            logging.info(f"🟦 Intentando guardar en '{SHEET_TAB_SUPERVISIONES}' con codigo={s_.get('codigo')}")
+            gs_append_dict(SHEET_TAB_SUPERVISIONES, payload)
+            logging.info("✅ Guardado en Sheets OK (Supervisiones).")
         except Exception as e:
-            logging.exception("Error guardando supervisión en Sheets")
+            logging.exception("❌ Error guardando supervisión en Sheets")
             await send_message(update, context, f"⚠️ Supervisión enviada a Evidencias, pero NO pude guardar en Sheets.\nDetalle: {e}")
 
     await send_message(update, context, f"✅ SE FINALIZÓ SUPERVISIÓN DE CÓDIGO {s_['codigo']}\n📤 Enviado a Evidencias y registrado en Sheets.")
@@ -1331,11 +1346,13 @@ def main():
     app.add_handler(CommandHandler("set_evidencias_edgar", set_evidencias_edgar))
     app.add_handler(CommandHandler("set_evidencias_harnol", set_evidencias_harnol))
     app.add_handler(CommandHandler("set_evidencias_nelson", set_evidencias_nelson))
+    app.add_handler(CommandHandler("set_evidencias_pruebas", set_evidencias_pruebas))
 
     app.add_handler(CommandHandler("link_rafael", link_rafael))
     app.add_handler(CommandHandler("link_edgar", link_edgar))
     app.add_handler(CommandHandler("link_harnol", link_harnol))
     app.add_handler(CommandHandler("link_nelson", link_nelson))
+    app.add_handler(CommandHandler("link_pruebas", link_pruebas))
     app.add_handler(CommandHandler("ver_links", ver_links))
 
     # ---- comandos sheets/plantillas
@@ -1396,7 +1413,7 @@ def main():
     # 1) Rescate de código (si el ConversationHandler no lo toma)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, codigo_global), group=1)
 
-    # 2) Captura de plantilla (no interfiere con el código; y va después del rescate)
+    # 2) Captura de plantilla (va después del rescate)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_capture_plantilla), group=2)
 
     logging.info("✅ Bot iniciado. Polling...")
@@ -1404,3 +1421,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
