@@ -20,6 +20,8 @@ import re
 import json
 import uuid
 import time
+import sys
+import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Tuple
@@ -53,6 +55,50 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
+
+# =========================
+# CAPTURA DE ERRORES "SILENCIOSOS" (Railway/PTB)
+# =========================
+def _install_global_exception_handlers() -> None:
+    """
+    Captura:
+    - Excepciones no manejadas del proceso (sys.excepthook)
+    - Excepciones no manejadas en el event loop de asyncio
+    Esto ayuda a ver el "error real" que provoca que el bot se detenga y PTB haga Application.stop().
+    """
+    def _excepthook(exc_type, exc, tb):
+        logging.critical("UNHANDLED EXCEPTION (sys.excepthook)", exc_info=(exc_type, exc, tb))
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+    sys.excepthook = _excepthook
+
+    try:
+        loop = asyncio.get_event_loop()
+    except Exception:
+        loop = None
+
+    if loop:
+        def _loop_exception_handler(_loop, context):
+            # context puede incluir: 'message', 'exception', etc.
+            logging.critical("UNHANDLED ASYNCIO ERROR: %s", context.get("message", ""))
+            exc = context.get("exception")
+            if exc:
+                logging.critical("Exception:", exc_info=exc)
+            else:
+                logging.critical("Context: %s", context)
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except Exception:
+                pass
+
+        loop.set_exception_handler(_loop_exception_handler)
+
+_install_global_exception_handlers()
 
 # =========================
 # ENV
@@ -1417,7 +1463,16 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_capture_plantilla), group=2)
 
     logging.info("✅ Bot iniciado. Polling...")
-    app.run_polling(close_loop=False)
+
+    # =========================
+    # RUN POLLING PROTEGIDO
+    # =========================
+    try:
+        # close_loop=False lo mantengo como lo tenías para evitar cambios de comportamiento.
+        app.run_polling(close_loop=False, drop_pending_updates=True)
+    except Exception as e:
+        logging.critical("FATAL ERROR: el bot se detuvo por una excepción no manejada.", exc_info=e)
+        raise
 
 if __name__ == "__main__":
     main()
